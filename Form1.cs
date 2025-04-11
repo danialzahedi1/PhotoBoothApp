@@ -1,20 +1,22 @@
-﻿using OpenCvSharp;
-using OpenCvSharp.Extensions;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Printing;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using OpenCvSharp;
+using OpenCvSharp.Extensions;
 
 namespace PhotoBoothApp
 {
     public partial class Form1 : Form
     {
+        private List<VideoCapture> cameras = new List<VideoCapture>();
         private VideoCapture currentCamera;
+        private Mat currentFrame = new Mat();
         private Bitmap previewImage;
         private bool isRunning = false;
-        private List<VideoCapture> cameras = new List<VideoCapture>();
+
         private List<Bitmap> capturedImages = new List<Bitmap>();
 
         public Form1()
@@ -24,72 +26,40 @@ namespace PhotoBoothApp
 
         private void Form1_Load(object sender, EventArgs e)
         {
-            // Initialize camera list and populate ComboBox
             ScanForCameras();
+            LoadInstalledPrinters();
         }
 
-        private void Form1_FormClosing(object sender, FormClosingEventArgs e)
-        {
-            StopCamera();
-        }
-
-        private void btnScanDevices_Click(object sender, EventArgs e)
-        {
-            ScanForCameras();
-        }
-
-        private void btnInitCamera_Click(object sender, EventArgs e)
-        {
-            // Start selected camera
-            if (comboBoxCameras.SelectedIndex >= 0)
-            {
-                StartCamera(comboBoxCameras.SelectedIndex);
-            }
-            else
-            {
-                MessageBox.Show("Please select a camera first.");
-            }
-        }
-
-        private void btnTakePhoto_Click(object sender, EventArgs e)
-        {
-            _ = TakePhotosAsync();
-        }
-
-        // Scan for cameras and add them to ComboBox
         private void ScanForCameras()
         {
-            StopCamera();
+            foreach (var cam in cameras)
+            {
+                cam.Release();
+            }
             cameras.Clear();
             comboBoxCameras.Items.Clear();
 
-            // Check up to 5 camera indices (adjust this number if needed)
             for (int i = 0; i < 5; i++)
             {
                 try
                 {
-                    VideoCapture cam = new VideoCapture(i);
+                    var cam = new VideoCapture(i);
                     if (cam.IsOpened())
                     {
                         cameras.Add(cam);
                         comboBoxCameras.Items.Add($"Camera {i}");
-                        Console.WriteLine($"Camera {i} is available.");
                     }
                     else
                     {
                         cam.Release();
                     }
                 }
-                catch
-                {
-                    // If a camera is not available, we catch the error
-                    Console.WriteLine($"Camera {i} is not available.");
-                }
+                catch { }
             }
 
-            if (comboBoxCameras.Items.Count > 0)
+            if (cameras.Count > 0)
             {
-                comboBoxCameras.SelectedIndex = 0; // Select the first available camera by default
+                comboBoxCameras.SelectedIndex = 0;
             }
             else
             {
@@ -97,16 +67,26 @@ namespace PhotoBoothApp
             }
         }
 
-        // Start the camera feed when selected from ComboBox
+        private void LoadInstalledPrinters()
+        {
+            comboBoxPrinters.Items.Clear();
+            foreach (string printer in PrinterSettings.InstalledPrinters)
+            {
+                comboBoxPrinters.Items.Add(printer);
+            }
+
+            PrintDocument pd = new PrintDocument();
+            comboBoxPrinters.SelectedItem = pd.PrinterSettings.PrinterName;
+        }
+
+        private void comboBoxCameras_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            StartCamera(comboBoxCameras.SelectedIndex);
+        }
+
         private void StartCamera(int index)
         {
             StopCamera();
-
-            if (index < 0 || index >= cameras.Count)
-            {
-                MessageBox.Show("Invalid camera selected.");
-                return;
-            }
 
             currentCamera = cameras[index];
             isRunning = true;
@@ -115,50 +95,46 @@ namespace PhotoBoothApp
             {
                 while (isRunning)
                 {
-                    using (Mat frame = new Mat())
+                    currentCamera.Read(currentFrame);
+                    if (!currentFrame.Empty())
                     {
-                        currentCamera.Read(frame);
-                        if (!frame.Empty())
-                        {
-                            previewImage = BitmapConverter.ToBitmap(frame);
+                        Mat flippedFrame = new Mat();
+                        Cv2.Flip(currentFrame, flippedFrame, FlipMode.Y); // Flip horizontally
 
-                            // Ensure the PictureBox gets updated on the UI thread
-                            if (pictureBoxLive.InvokeRequired)
-                            {
-                                pictureBoxLive.Invoke(new Action(() =>
-                                {
-                                    pictureBoxLive.Image?.Dispose();
-                                    pictureBoxLive.Image = new Bitmap(previewImage);
-                                }));
-                            }
-                            else
+                        previewImage = BitmapConverter.ToBitmap(flippedFrame);
+
+                        if (pictureBoxLive.InvokeRequired)
+                        {
+                            pictureBoxLive.Invoke(new Action(() =>
                             {
                                 pictureBoxLive.Image?.Dispose();
-                                pictureBoxLive.Image = new Bitmap(previewImage);
-                            }
+                                pictureBoxLive.Image = (Bitmap)previewImage.Clone();
+                            }));
+                        }
+
+                        if (pictureBoxPreview.InvokeRequired)
+                        {
+                            pictureBoxPreview.Invoke(new Action(() =>
+                            {
+                                pictureBoxPreview.Image?.Dispose();
+                                pictureBoxPreview.Image = (Bitmap)previewImage.Clone();
+                            }));
                         }
                     }
                 }
             });
         }
 
-        // Stop the camera feed
         private void StopCamera()
         {
             isRunning = false;
             if (currentCamera != null)
             {
                 currentCamera.Release();
-                currentCamera.Dispose();
-                currentCamera = null;
             }
-
-            pictureBoxLive.Image?.Dispose();
-            pictureBoxLive.Image = null;
         }
 
-        // Take 3 photos with a 1-second delay between each
-        private async Task TakePhotosAsync()
+        private async void btnTakePhoto_Click(object sender, EventArgs e)
         {
             capturedImages.Clear();
 
@@ -168,36 +144,86 @@ namespace PhotoBoothApp
                 {
                     capturedImages.Add((Bitmap)previewImage.Clone());
                 }
-                await Task.Delay(1000); // Delay of 1 second between photos
+                await Task.Delay(1000);
             }
 
             PrintCapturedImages();
         }
 
-        // Print captured images (stacked vertically)
         private void PrintCapturedImages()
         {
             if (capturedImages.Count == 0) return;
 
-            int width = capturedImages[0].Width;
-            int height = capturedImages[0].Height;
-            Bitmap combined = new Bitmap(width, height * 3);
-
-            using (Graphics g = Graphics.FromImage(combined))
+            string selectedPrinter = comboBoxPrinters.SelectedItem?.ToString();
+            if (string.IsNullOrEmpty(selectedPrinter))
             {
-                for (int i = 0; i < capturedImages.Count; i++)
-                {
-                    g.DrawImage(capturedImages[i], 0, i * height);
-                }
+                MessageBox.Show("Please select a printer first.");
+                return;
             }
 
             PrintDocument printDoc = new PrintDocument();
+            printDoc.PrinterSettings.PrinterName = selectedPrinter;
+
             printDoc.PrintPage += (s, e) =>
             {
-                e.Graphics.DrawImage(combined, 0, 0);
+                int imageCount = capturedImages.Count;
+                int spacing = 20; // space between images
+                int availableHeight = e.MarginBounds.Height;
+                int availableWidth = e.MarginBounds.Width;
+
+                // Total spacing height
+                int totalSpacing = spacing * (imageCount + 1);
+
+                // Max height available for all images
+                int maxImageHeightTotal = availableHeight - totalSpacing;
+                int maxImageHeightEach = maxImageHeightTotal / imageCount;
+
+                int y = e.MarginBounds.Top + spacing;
+
+                foreach (Bitmap img in capturedImages)
+                {
+                    // Calculate new size preserving aspect ratio
+                    float ratio = (float)img.Width / img.Height;
+                    int newHeight = maxImageHeightEach;
+                    int newWidth = (int)(newHeight * ratio);
+
+                    // Center horizontally
+                    int x = e.MarginBounds.Left + (availableWidth - newWidth) / 2;
+
+                    e.Graphics.DrawImage(img, new Rectangle(x, y, newWidth, newHeight));
+                    y += newHeight + spacing;
+                }
+
+                // Optional: Draw label at the bottom
+                string footer = "PhotoBooth App 2025!";
+                Font font = new Font("Arial", 16, FontStyle.Bold);
+                SizeF textSize = e.Graphics.MeasureString(footer, font);
+                float textX = e.MarginBounds.Left + (availableWidth - textSize.Width) / 2;
+                float textY = y;
+
+                e.Graphics.DrawString(footer, font, Brushes.Black, textX, textY);
             };
 
-            printDoc.Print();
+            try
+            {
+                printDoc.Print();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Print failed: {ex.Message}");
+            }
+        }
+
+
+        private void Form1_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            StopCamera();
+        }
+
+        private void btnScanDevices_Click(object sender, EventArgs e)
+        {
+            ScanForCameras();
+            LoadInstalledPrinters();
         }
     }
 }
